@@ -27,7 +27,7 @@ export const TargetGrid = ({ rows }: { rows: TargetRow[] }) => {
       <div className='flex flex-wrap gap-[2px]'>
         {shown.map((row) => {
           const { label, hollow } = targetStatePresentations[row.state];
-          const name = row.target.metadata?.name || '';
+          const name = row.target.name || '';
           return (
             <span
               key={name}

@@ -5,7 +5,7 @@ import {
   PromotionRequest,
   PromotionRequestSummary,
   Stage,
-  Target
+  TargetSummary
 } from '@ui/gen/api/v2/models';
 
 // Severity ranks a row for ordering: rounds that went wrong come first,
@@ -15,7 +15,7 @@ export const SEVERITY_ACTIVE = 1;
 export const SEVERITY_SETTLED = 2;
 
 export type FleetRow = {
-  target: Target;
+  target: TargetSummary;
   // The round whose outcome the row reports, if the Stage has had one.
   request?: PromotionRequest;
   // Whether that round named this Target. A Target that joined the Stage
@@ -27,10 +27,13 @@ export type FleetRow = {
   // the round itself when it ended before a child could be created; and is
   // Pending while the round has yet to reach this Target.
   phase?: string;
-  // What the Target is running for this Stage, from the Target's own status.
-  // Absent until a Promotion from the Stage to this Target has succeeded.
-  currentFreight?: FreightCollection;
-  // Whether currentFreight matches the Stage's own current collection. False
+  // What the Target is running for this Stage: the ID of the collection the
+  // Stage's latest successful Promotion to it rendered, and the Freight in it.
+  // Absent and empty until a Promotion from the Stage to this Target has
+  // succeeded.
+  collectionID?: string;
+  freight: string[];
+  // Whether collectionID matches the Stage's own current collection. False
   // when the Target has fallen behind; undefined when either side is unknown.
   upToDate?: boolean;
   // The Target's health with respect to this Stage's Freight.
@@ -76,17 +79,17 @@ export const roundPhase = (
 // Stage runs. Collection IDs are deterministic in their contents, so equal IDs
 // mean equal Freight; either side missing leaves the question open.
 export const collectionUpToDate = (
-  currentFreight: FreightCollection | undefined,
-  collectionID: string | undefined
+  collectionID: string | undefined,
+  stageCollectionID: string | undefined
 ): boolean | undefined =>
-  currentFreight?.id && collectionID ? currentFreight.id === collectionID : undefined;
+  collectionID && stageCollectionID ? collectionID === stageCollectionID : undefined;
 
 // promotionPhaseFor resolves what a Target's Promotion cell shows for a round.
 const promotionPhaseFor = (
-  target: Target,
+  target: TargetSummary,
   request?: PromotionRequest
 ): Pick<FleetRow, 'included' | 'promotion' | 'phase'> => {
-  const name = target.metadata?.name;
+  const name = target.name;
   const included = !!request?.spec?.targets?.some((named) => named.name === name);
   if (!request || !included) {
     return { included };
@@ -97,24 +100,24 @@ const promotionPhaseFor = (
 
 // fleetRows builds one row per Target the Stage governs, reading the round's
 // outcome from the PromotionRequest and the Target's standing state from its
-// own status. Rows with trouble sort first, then by Target name.
+// summary. Rows with trouble sort first, then by Target name.
 export const fleetRows = (
   stage: Stage,
-  targets: Target[],
+  targets: TargetSummary[],
   request?: PromotionRequest
 ): FleetRow[] => {
   const stageName = stage.metadata?.name || '';
   const stageCollectionID = stage.status?.freightHistory?.[0]?.id;
   return targets
     .map<FleetRow>((target) => {
-      const forStage = target.status?.stages?.[stageName];
-      const currentFreight = forStage?.currentFreight;
+      const forStage = target.stages?.[stageName];
       return {
         target,
         request,
         ...promotionPhaseFor(target, request),
-        currentFreight,
-        upToDate: collectionUpToDate(currentFreight, stageCollectionID),
+        collectionID: forStage?.collectionID,
+        freight: forStage?.freight || [],
+        upToDate: collectionUpToDate(forStage?.collectionID, stageCollectionID),
         health: forStage?.health
       };
     })
@@ -123,7 +126,7 @@ export const fleetRows = (
       if (bySeverity !== 0) {
         return bySeverity;
       }
-      return (lhs.target.metadata?.name || '').localeCompare(rhs.target.metadata?.name || '');
+      return (lhs.target.name || '').localeCompare(rhs.target.name || '');
     });
 };
 
@@ -135,14 +138,14 @@ export const freightNames = (collection?: FreightCollection): string[] =>
     .filter(Boolean)
     .sort();
 
-// rowFreightNames lists the Freight a row shows: what the Target's own status
-// says it runs for this Stage, when the status says so. Until then, a Target
+// rowFreightNames lists the Freight a row shows: what the Target's summary
+// says it runs for this Stage, when it says so. Until then, a Target
 // the round is promoting to, or has promoted to, shows the round's Freight.
 // A Target the round never named, or whose Promotion did not succeed, shows
 // nothing: that Freight never reached it.
 export const rowFreightNames = (row: FleetRow): string[] => {
-  if (row.currentFreight) {
-    return freightNames(row.currentFreight);
+  if (row.freight.length) {
+    return row.freight;
   }
   if (!row.included) {
     return [];
@@ -199,8 +202,8 @@ export const matchesTarget = (row: FleetRow, needle: string): boolean => {
     return true;
   }
   const haystack = [
-    row.target.metadata?.name || '',
-    ...Object.entries(row.target.metadata?.labels || {}).map(([k, v]) => `${k}=${v}`)
+    row.target.name || '',
+    ...Object.entries(row.target.labels || {}).map(([k, v]) => `${k}=${v}`)
   ]
     .join(' ')
     .toLowerCase();

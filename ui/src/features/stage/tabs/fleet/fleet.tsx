@@ -12,7 +12,7 @@ import { HealthStatusIcon } from '@ui/features/common/health-status/health-statu
 import { PromotionStatusIcon } from '@ui/features/common/promotion-status/promotion-status-icon';
 import { getAlias } from '@ui/features/common/utils';
 import { TARGETS_POLL_INTERVAL_MS } from '@ui/features/project/targets/constants';
-import { useListTargets } from '@ui/gen/api/v2/core/core';
+import { useListTargetSummaries } from '@ui/gen/api/v2/core/core';
 import { PromotionRequest, Stage } from '@ui/gen/api/v2/models';
 import { parseDate } from '@ui/utils/dates';
 
@@ -108,15 +108,15 @@ const PromotionCell = ({
  *
  * Governance comes from the API's `stage` filter, which evaluates the Stage's
  * selectors exactly as the controller does. Freight and health per Target come
- * from the Target's own status for this Stage; the round's outcome comes from
- * the Stage's current PromotionRequest, which the drawer resolves once and
- * passes in.
+ * from the Target's summary for this Stage, which carries only what this view
+ * draws; the round's outcome comes from the Stage's current PromotionRequest,
+ * which the drawer resolves once and passes in.
  */
 export const Fleet = ({ projectName, stage, round }: Props) => {
   const stageName = stage.metadata?.name || '';
 
   // Targets live in the database, which offers no watch; the list is polled.
-  const targetsQuery = useListTargets(
+  const targetsQuery = useListTargetSummaries(
     projectName,
     { stage: stageName },
     { query: { refetchInterval: TARGETS_POLL_INTERVAL_MS } }
@@ -199,10 +199,10 @@ export const Fleet = ({ projectName, stage, round }: Props) => {
         <Flex vertical gap={4}>
           <Typography.Text className='text-xs font-semibold'>
             <FontAwesomeIcon icon={faBullseye} className='mr-2 text-gray-400' />
-            {row.target.metadata?.name}
+            {row.target.name}
           </Typography.Text>
           <Flex gap={4} wrap>
-            {Object.entries(row.target.metadata?.labels || {}).map(([key, value]) => (
+            {Object.entries(row.target.labels || {}).map(([key, value]) => (
               <Tag key={key} className='m-0 text-xs'>
                 {key}={value}
               </Tag>
@@ -342,7 +342,7 @@ export const Fleet = ({ projectName, stage, round }: Props) => {
           columns={columns}
           size='small'
           pagination={false}
-          rowKey={(row) => row.target.metadata?.name || ''}
+          rowKey={(row) => row.target.name || ''}
           onChange={(_, next) => setFilters(next)}
         />
       )}

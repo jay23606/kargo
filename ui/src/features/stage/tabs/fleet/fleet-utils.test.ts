@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { PromotionRequest, Stage, Target } from '@ui/gen/api/v2/models';
+import { PromotionRequest, Stage, TargetStageSummary, TargetSummary } from '@ui/gen/api/v2/models';
 
 import {
   FleetRow,
@@ -23,10 +23,11 @@ const stage = (partial: Partial<Stage> = {}): Stage => ({
   ...partial
 });
 
-const target = (name: string, partial: Partial<Target> = {}): Target => ({
-  metadata: { name },
-  ...partial
-});
+const target = (
+  name: string,
+  stages?: Record<string, TargetStageSummary>,
+  labels?: Record<string, string>
+): TargetSummary => ({ name, labels, stages });
 
 const request = (targets: string[], status?: PromotionRequest['status']): PromotionRequest => ({
   metadata: { name: 'prod.01a.x' },
@@ -44,7 +45,7 @@ describe('rowSeverity()', () => {
     ['Aborted', SEVERITY_SETTLED],
     [undefined, SEVERITY_SETTLED]
   ])('%s -> %s', (phase, severity) => {
-    expect(rowSeverity({ target: target('t'), included: true, phase })).toBe(severity);
+    expect(rowSeverity({ target: target('t'), included: true, freight: [], phase })).toBe(severity);
   });
 });
 
@@ -112,46 +113,32 @@ describe('fleetRows()', () => {
     expect(rowFreightNames(rows[0])).toEqual([]);
   });
 
-  test('reads current Freight and health from the Target status for this Stage', () => {
+  test("reads current Freight and health from the Target's summary for this Stage", () => {
     const t = target('t', {
-      status: {
-        stages: {
-          prod: {
-            currentFreight: { id: 'c1', items: { 'Warehouse/w': { name: 'f1' } } },
-            health: { status: 'Healthy' }
-          },
-          other: {
-            currentFreight: { id: 'c9', items: { 'Warehouse/w': { name: 'f9' } } },
-            health: { status: 'Unhealthy' }
-          }
-        }
-      }
+      prod: { collectionID: 'c1', freight: ['f1'], health: { status: 'Healthy' } },
+      other: { collectionID: 'c9', freight: ['f9'], health: { status: 'Unhealthy' } }
     });
     const [row] = fleetRows(stage(), [t]);
-    expect(row.currentFreight?.id).toBe('c1');
+    expect(row.collectionID).toBe('c1');
+    expect(row.freight).toEqual(['f1']);
     expect(row.health?.status).toBe('Healthy');
   });
 
   test('upToDate compares the Target collection to the Stage current collection', () => {
     const s = stage({ status: { freightHistory: [{ id: 'c1', items: {} }] } });
-    const on = target('on', {
-      status: { stages: { prod: { currentFreight: { id: 'c1', items: {} } } } }
-    });
-    const behind = target('behind', {
-      status: { stages: { prod: { currentFreight: { id: 'c0', items: {} } } } }
-    });
+    const on = target('on', { prod: { collectionID: 'c1' } });
+    const behind = target('behind', { prod: { collectionID: 'c0' } });
     const unknown = target('unknown');
     const rows = fleetRows(s, [on, behind, unknown]);
-    const byName = Object.fromEntries(rows.map((row) => [row.target.metadata?.name, row]));
+    const byName = Object.fromEntries(rows.map((row) => [row.target.name, row]));
     expect(byName.on.upToDate).toBe(true);
     expect(byName.behind.upToDate).toBe(false);
     expect(byName.unknown.upToDate).toBeUndefined();
+    expect(byName.unknown.freight).toEqual([]);
   });
 
   test('upToDate is undefined when the Stage has no current collection', () => {
-    const on = target('on', {
-      status: { stages: { prod: { currentFreight: { id: 'c1', items: {} } } } }
-    });
+    const on = target('on', { prod: { collectionID: 'c1' } });
     expect(fleetRows(stage(), [on])[0].upToDate).toBeUndefined();
   });
 
@@ -165,7 +152,7 @@ describe('fleetRows()', () => {
       ]
     });
     const rows = fleetRows(stage(), [target('d'), target('c'), target('b'), target('a')], round);
-    expect(rows.map((row) => row.target.metadata?.name)).toEqual(['b', 'c', 'd', 'a']);
+    expect(rows.map((row) => row.target.name)).toEqual(['b', 'c', 'd', 'a']);
   });
 });
 
@@ -202,14 +189,14 @@ describe('roundPhase()', () => {
 
 describe('collectionUpToDate()', () => {
   test.each([
-    [{ id: 'abc' }, 'abc', true],
-    [{ id: 'old' }, 'abc', false],
+    ['abc', 'abc', true],
+    ['old', 'abc', false],
     // Nothing to compare: the question is open, not answered false.
     [undefined, 'abc', undefined],
-    [{ id: 'abc' }, undefined, undefined],
-    [{}, 'abc', undefined]
-  ])('%j against %j -> %s', (collection, collectionID, expected) => {
-    expect(collectionUpToDate(collection, collectionID)).toBe(expected);
+    ['abc', undefined, undefined],
+    ['', 'abc', undefined]
+  ])('%j against %j -> %s', (collectionID, stageCollectionID, expected) => {
+    expect(collectionUpToDate(collectionID, stageCollectionID)).toBe(expected);
   });
 });
 
@@ -231,20 +218,16 @@ describe('freightNames()', () => {
 describe('rowFreightNames()', () => {
   const roundRequest: PromotionRequest = { spec: { freight: 'round-freight' } };
   const row = (overrides: Partial<FleetRow>): FleetRow => ({
-    target: { metadata: { name: 't' } },
+    target: { name: 't' },
     request: roundRequest,
     included: true,
+    freight: [],
     ...overrides
   });
 
-  test("prefers what the Target's status says it runs", () => {
+  test("prefers what the Target's summary says it runs", () => {
     expect(
-      rowFreightNames(
-        row({
-          phase: 'Failed',
-          currentFreight: { id: 'x', items: { 'Warehouse/w': { name: 'running-freight' } } }
-        })
-      )
+      rowFreightNames(row({ phase: 'Failed', collectionID: 'x', freight: ['running-freight'] }))
     ).toEqual(['running-freight']);
   });
 
@@ -268,6 +251,7 @@ describe('rowsSummary()', () => {
     const row = (phase?: string, included = true) => ({
       target: target('t'),
       included,
+      freight: [],
       phase
     });
     expect(
@@ -290,7 +274,8 @@ describe('rowsSummary()', () => {
 });
 
 const rowOf = (name: string, phase?: string, labels?: Record<string, string>) => ({
-  target: target(name, { metadata: { name, labels } }),
+  target: target(name, undefined, labels),
+  freight: [],
   included: true,
   phase
 });

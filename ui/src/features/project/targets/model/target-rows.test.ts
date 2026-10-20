@@ -1,9 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { PromotionRequest } from '@ui/gen/api/v2/models';
-
 import {
-  Rounds,
   behindCount,
   byWorstState,
   freightTally,
@@ -12,7 +9,7 @@ import {
   targetRows,
   worstState
 } from './target-rows';
-import { fleetStage, forStage, round, stage, target } from './test-fixtures';
+import { fleetStage, forStage, stage, target } from './test-fixtures';
 
 describe('worstState()', () => {
   test('takes the worst of several Stages', () => {
@@ -33,12 +30,22 @@ describe('targetRows()', () => {
 
   test('one row per Target with its governing Stages, both sorted by name', () => {
     const rows = targetRows(
-      [target('us-west-2', { region: 'us' }), target('eu-central-1', { region: 'eu' })],
+      [
+        target('us-west-2', { region: 'us' }, { 'us-stage': {}, 'all-stage': {} }),
+        target('eu-central-1', { region: 'eu' }, { 'all-stage': {} })
+      ],
       [us, classic, all]
     );
-    expect(rows.map((r) => r.target.metadata?.name)).toEqual(['eu-central-1', 'us-west-2']);
+    expect(rows.map((r) => r.target.name)).toEqual(['eu-central-1', 'us-west-2']);
     expect(rows[0].stages.map((s) => s.stage.metadata?.name)).toEqual(['all-stage']);
     expect(rows[1].stages.map((s) => s.stage.metadata?.name)).toEqual(['all-stage', 'us-stage']);
+  });
+
+  test("which Stages govern a Target is the summary's to say", () => {
+    // The page knows the Stage, but the summary does not name it, and names
+    // one the page does not know: neither governs the row.
+    const [row] = targetRows([target('t', { region: 'us' }, { unknown: forStage('abc') })], [us]);
+    expect(row.stages).toEqual([]);
   });
 
   test('an ungoverned Target has never been promoted', () => {
@@ -53,7 +60,7 @@ describe('targetRows()', () => {
     const t = target(
       't',
       { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('abc', 'Unhealthy') } } }
+      { 'us-stage': forStage('abc', 'Unhealthy'), 'all-stage': forStage() }
     );
     const [row] = targetRows([t], [us, all]);
     const byStage = Object.fromEntries(row.stages.map((s) => [s.stage.metadata?.name, s.health]));
@@ -62,83 +69,59 @@ describe('targetRows()', () => {
   });
 
   test.each([
-    ['governed but never promoted to', undefined, 'NotPromoted', false],
+    ['governed but never promoted to', forStage(), 'NotPromoted', false],
     ['on the latest Freight and healthy', forStage('abc', 'Healthy'), 'Healthy', false],
     ['healthy on older Freight', forStage('old', 'Healthy'), 'Behind', true],
     ['unhealthy', forStage('abc', 'Unhealthy'), 'Unhealthy', false],
     ['degraded', forStage('abc', 'Degraded'), 'Unhealthy', false],
     ['reported as unknown', forStage('abc', 'Unknown'), 'Unknown', false],
     ['unhealthy and behind', forStage('old', 'Unhealthy'), 'Unhealthy', true]
-  ])('a Target %s is %s', (_name, status, state, behind) => {
-    const t = target('t', { region: 'us' }, { status: { stages: { 'us-stage': status } } });
-    const [row] = targetRows([t], [us]);
+  ])('a Target %s is %s', (_name, summary, state, behind) => {
+    const [row] = targetRows([target('t', { region: 'us' }, { 'us-stage': summary })], [us]);
     expect(row.state).toBe(state);
     expect(row.behind).toBe(behind);
   });
 
   // Targets carry no recorded health yet, so for most fleets the state comes
-  // from how the Stage's latest round went. These cases are the ordinary ones.
+  // from how the Stage's latest Promotion to the Target went. These cases are
+  // the ordinary ones.
   describe('with no health recorded', () => {
-    const succeeded = (name: string) =>
-      round('us-stage', [name], {
-        phase: 'Succeeded',
-        targets: [{ name, phase: 'Succeeded' }]
-      });
+    const governed = (summary = forStage()) =>
+      targetRows([target('t', { region: 'us' }, { 'us-stage': summary })], [us])[0];
 
-    test('a Target the latest round landed on is healthy, even with no status', () => {
-      const t = target('t', { region: 'us' });
-      const [row] = targetRows([t], [us], { 'us-stage': succeeded('t') });
+    test('a Target the latest Promotion landed on is healthy, with nothing to compare', () => {
+      const row = governed(forStage(undefined, undefined, undefined, 'Succeeded'));
       expect(row.state).toBe('Healthy');
       expect(row.behind).toBe(false);
-      // Nothing to compare collections with, so the round stands in for it.
+      // Nothing to compare collections with, so the Promotion stands in for it.
       expect(row.stages[0].upToDate).toBe(true);
+      expect(row.stages[0].promotion?.name).toBe('promotion');
     });
 
-    test('a Target the latest round failed on is unhealthy and behind', () => {
-      const t = target('t', { region: 'us' });
-      const failed = round('us-stage', ['t'], {
-        phase: 'Failed',
-        targets: [{ name: 't', phase: 'Failed' }]
-      });
-      const [row] = targetRows([t], [us], { 'us-stage': failed });
+    test('a Target the latest Promotion failed on is unhealthy and behind', () => {
+      const row = governed(forStage(undefined, undefined, undefined, 'Failed'));
       expect(row.state).toBe('Unhealthy');
       expect(row.behind).toBe(true);
     });
 
-    test('a Target with Freight on it is healthy without a round at all', () => {
-      const t = target(
-        't',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('abc') } } }
-      );
-      expect(targetRows([t], [us])[0].state).toBe('Healthy');
+    test('a Target with Freight on it is healthy without a Promotion to go by', () => {
+      expect(governed(forStage('abc')).state).toBe('Healthy');
     });
 
     test('a Target left on older Freight is behind, not healthy', () => {
-      const t = target(
-        't',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('old') } } }
-      );
-      const [row] = targetRows([t], [us]);
+      const row = governed(forStage('old'));
       expect(row.state).toBe('Behind');
       expect(row.behind).toBe(true);
     });
 
-    test('a Target no round and no Freight reaches has not been promoted to', () => {
-      const t = target('t', { region: 'us' });
-      expect(targetRows([t], [us], { 'us-stage': round('us-stage', ['other']) })[0].state).toBe(
-        'NotPromoted'
-      );
+    test('a Target nothing has reached has not been promoted to', () => {
+      expect(governed().state).toBe('NotPromoted');
     });
 
-    test('recorded health outranks the round it fell back to', () => {
-      const t = target(
-        't',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('abc', 'Unhealthy') } } }
+    test('recorded health outranks the Promotion it fell back to', () => {
+      expect(governed(forStage('abc', 'Unhealthy', undefined, 'Succeeded')).state).toBe(
+        'Unhealthy'
       );
-      expect(targetRows([t], [us], { 'us-stage': succeeded('t') })[0].state).toBe('Unhealthy');
     });
   });
 
@@ -147,12 +130,8 @@ describe('targetRows()', () => {
       't',
       { region: 'us' },
       {
-        status: {
-          stages: {
-            'us-stage': forStage('abc', 'Healthy', 'freight-a'),
-            'all-stage': forStage('old', 'Healthy', 'freight-b')
-          }
-        }
+        'us-stage': forStage('abc', 'Healthy', 'freight-a'),
+        'all-stage': forStage('old', 'Healthy', 'freight-b')
       }
     );
     expect(targetRows([t], [us, all])[0].freight).toEqual(['freight-b', 'freight-a']);
@@ -162,63 +141,27 @@ describe('targetRows()', () => {
     const t = target(
       't',
       { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('old') } } }
+      { 'us-stage': forStage('old', undefined, 'f', 'Running') }
     );
-    const rounds: Rounds = {
-      'us-stage': round('us-stage', ['t'], { targets: [{ name: 't', phase: 'Running' }] })
-    };
-    expect(targetRows([t], [us], rounds)[0].state).toBe('Progressing');
+    const [row] = targetRows([t], [us]);
+    expect(row.state).toBe('Progressing');
+    expect(row.stages[0].phase).toBe('Running');
   });
 
-  test('a Target the round has yet to reach is Progressing', () => {
+  test('a Promotion yet to be picked up is Pending, and Progressing', () => {
+    const t = target('t', { region: 'us' }, { 'us-stage': forStage('old', undefined, 'f', '') });
+    const [row] = targetRows([t], [us]);
+    expect(row.stages[0].phase).toBe('Pending');
+    expect(row.state).toBe('Progressing');
+  });
+
+  test('a Promotion that has ended leaves the Target as its Freight says', () => {
     const t = target(
       't',
       { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('old') } } }
+      { 'us-stage': forStage('abc', 'Healthy', 'f', 'Succeeded') }
     );
-    expect(targetRows([t], [us], { 'us-stage': round('us-stage', ['t']) })[0].state).toBe(
-      'Progressing'
-    );
-  });
-
-  test('a round that has ended leaves its Targets as their status says', () => {
-    const t = target(
-      't',
-      { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('abc', 'Healthy') } } }
-    );
-    const rounds: Rounds = {
-      'us-stage': round('us-stage', ['t'], {
-        phase: 'Succeeded',
-        targets: [{ name: 't', phase: 'Succeeded' }]
-      })
-    };
-    expect(targetRows([t], [us], rounds)[0].state).toBe('Healthy');
-  });
-
-  test('a round that never fanned out leaves its Targets alone', () => {
-    const t = target(
-      't',
-      { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('old') } } }
-    );
-    const blocked = round('us-stage', ['t'], {
-      conditions: [
-        { type: 'Ready', status: 'False', reason: 'EnterpriseOnlyFeature', message: 'nope' }
-      ]
-    } as Partial<PromotionRequest['status']>);
-    expect(targetRows([t], [us], { 'us-stage': blocked })[0].state).toBe('Behind');
-  });
-
-  test('a Target the round never named is left alone', () => {
-    const t = target(
-      't',
-      { region: 'us' },
-      { status: { stages: { 'us-stage': forStage('abc', 'Healthy') } } }
-    );
-    expect(targetRows([t], [us], { 'us-stage': round('us-stage', ['other']) })[0].state).toBe(
-      'Healthy'
-    );
+    expect(targetRows([t], [us])[0].state).toBe('Healthy');
   });
 });
 
@@ -226,21 +169,9 @@ describe('stateCounts() and behindCount()', () => {
   const us = fleetStage('us-stage', [{ matchLabels: { region: 'us' } }], 'abc');
   const rows = targetRows(
     [
-      target(
-        'a',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('abc', 'Healthy') } } }
-      ),
-      target(
-        'b',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('old', 'Healthy') } } }
-      ),
-      target(
-        'c',
-        { region: 'us' },
-        { status: { stages: { 'us-stage': forStage('old', 'Unhealthy') } } }
-      ),
+      target('a', { region: 'us' }, { 'us-stage': forStage('abc', 'Healthy') }),
+      target('b', { region: 'us' }, { 'us-stage': forStage('old', 'Healthy') }),
+      target('c', { region: 'us' }, { 'us-stage': forStage('old', 'Unhealthy') }),
       target('d', { region: 'us' })
     ],
     [us]
@@ -279,9 +210,9 @@ describe('freightTally()', () => {
   test('counts the Targets on each piece of Freight, commonest first', () => {
     const rows = targetRows(
       [
-        target('a', {}, { status: { stages: { 'us-stage': forStage('abc', 'Healthy', 'new') } } }),
-        target('b', {}, { status: { stages: { 'us-stage': forStage('old', 'Healthy', 'old') } } }),
-        target('c', {}, { status: { stages: { 'us-stage': forStage('abc', 'Healthy', 'new') } } }),
+        target('a', {}, { 'us-stage': forStage('abc', 'Healthy', 'new') }),
+        target('b', {}, { 'us-stage': forStage('old', 'Healthy', 'old') }),
+        target('c', {}, { 'us-stage': forStage('abc', 'Healthy', 'new') }),
         target('d')
       ],
       [us]
@@ -300,16 +231,8 @@ describe('stageRollouts()', () => {
   test('summarizes each Stage over the rows given', () => {
     const rows = targetRows(
       [
-        target(
-          'a',
-          { region: 'us' },
-          { status: { stages: { 'us-stage': forStage('abc', 'Healthy', 'new') } } }
-        ),
-        target(
-          'b',
-          { region: 'us' },
-          { status: { stages: { 'us-stage': forStage('old', 'Unhealthy') } } }
-        )
+        target('a', { region: 'us' }, { 'us-stage': forStage('abc', 'Healthy', 'new') }),
+        target('b', { region: 'us' }, { 'us-stage': forStage('old', 'Unhealthy') })
       ],
       [us, eu]
     );
@@ -337,16 +260,12 @@ describe('byWorstState()', () => {
   test('puts trouble first and ties break by name', () => {
     const rows = targetRows(
       [
-        target('zed', {}, { status: { stages: { 'us-stage': forStage('abc', 'Healthy') } } }),
-        target('ann', {}, { status: { stages: { 'us-stage': forStage('abc', 'Healthy') } } }),
-        target('bob', {}, { status: { stages: { 'us-stage': forStage('abc', 'Unhealthy') } } })
+        target('zed', {}, { 'us-stage': forStage('abc', 'Healthy') }),
+        target('ann', {}, { 'us-stage': forStage('abc', 'Healthy') }),
+        target('bob', {}, { 'us-stage': forStage('abc', 'Unhealthy') })
       ],
       [us]
     );
-    expect(byWorstState(rows).map((row) => row.target.metadata?.name)).toEqual([
-      'bob',
-      'ann',
-      'zed'
-    ]);
+    expect(byWorstState(rows).map((row) => row.target.name)).toEqual(['bob', 'ann', 'zed']);
   });
 });
